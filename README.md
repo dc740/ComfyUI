@@ -1,3 +1,31 @@
+# ComfyUI (dc740 fork - gfx906/ROCm fixes)
+
+Branch `gfx906-vae-dma-fixes`: small fixes developed and measured on AMD MI50/MI60 (gfx906, ROCm 7) running SeedVR2 long-video pipelines. All changes are opt-in or no-cost guards; upstream behavior is unchanged unless noted.
+
+## Changes
+
+### `comfy/model_patcher.py` - offload-stream DMA lifetime fixes
+
+Three teardown paths could unmap or unregister memory while async DMA copies were still in flight on the shared offload streams, producing GPU-side page faults (observed as an XDMA write fault on ROCm; tolerated on some CUDA drivers):
+
+- `partially_unload`: `vbar.free_memory` unmaps device pages a `read_file_to_device` DMA may still be writing - syncs the offload streams first when memory is actually being freed.
+- `unregister_inactive_pins`: bare `cudaHostUnregister` on pins that are H2D *sources* for chained `hostbuf.read_file_slice` DMA - syncs first.
+- `partially_unload_ram`: `hostbuf.truncate` unmaps/munmaps pin pages under in-flight DMA - syncs first.
+
+This mirrors the guard ComfyUI already applies at the same hazard sites (`_steal_pin` in `pinned_memory.py`, `reset_cast_buffers`, `_free_slot` in `model_animate2.py`).
+
+Measured: eliminates deterministic GPU page faults (`hipErrorIllegalAddress`, XDMA write fault) observed on ROCm/gfx906 in long SeedVR2 VAE runs using dynamic VRAM + offload streams.
+
+### `comfy/ldm/seedvr/vae.py` - SeedVR2 VAE tuning env gates
+
+Opt-in switches for the SeedVR2 causal VAE's temporal memory cache and decode chunking. Defaults are unchanged; each takes effect when the env var is set at process start.
+
+- `SEEDVR2_VAE_PLAIN_CACHES=1`: keep temporal-cache tails as plain fp16 on the GPU - disables int8 ConvRot packing (`_packable`) and pinned-host offload (`_offload_caches_for`, including `park()` spill). Measured ~6% faster VAE encode+decode end-to-end on gfx906; trades several GB of extra VRAM for it.
+- `SEEDVR2_VAE_TAIL_FRAMES=N`: frames per pass through the decoder's spatial-only tail (default 1). Tail activation grows ~Nx, so larger tiles require smaller N.
+- `SEEDVR2_VAE_SLICE_MIN=N`: minimum latent slice size for temporal chunking in decode (default 1). No measurable end-to-end effect observed.
+
+---
+
 <div align="center">
 
 # ComfyUI
