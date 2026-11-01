@@ -2133,6 +2133,9 @@ class ModelPatcherDynamic(ModelPatcher):
         assert self.load_device != torch.device("cpu")
 
         vbar = self._vbar_get()
+        if vbar is not None and memory_to_free > 0:
+            # free_memory unmaps device pages an offload-stream DMA may still be writing
+            comfy.model_management.sync_all_offload_streams()
         vbar_freed = 0 if vbar is None else vbar.free_memory(memory_to_free)
         freed = vbar_freed
 
@@ -2164,6 +2167,8 @@ class ModelPatcherDynamic(ModelPatcher):
         return pin_state["weights"][3][0] + pin_state["weights-loaded"][3][0] + pin_state["weights-fast"][3][0]
 
     def unregister_inactive_pins(self, ram_to_unload, subsets=[ "weights-loaded", "patches-loaded", "weights", "patches" ]):
+        # Unregistering a pin under an in-flight offload-stream DMA faults on ROCm
+        comfy.model_management.sync_all_offload_streams()
         freed = 0
         pin_state = self.model.dynamic_pins[self.load_device]
         for subset in subsets:
@@ -2191,6 +2196,8 @@ class ModelPatcherDynamic(ModelPatcher):
         return freed
 
     def partially_unload_ram(self, ram_to_unload, subsets=[ "weights-fast", "patches-fast", "weights-loaded", "patches-loaded", "weights", "patches" ]):
+        # hostbuf.truncate unmaps pin pages an offload-stream DMA may still read/write
+        comfy.model_management.sync_all_offload_streams()
         freed = 0
         pin_state = self.model.dynamic_pins[self.load_device]
         for subset in subsets:

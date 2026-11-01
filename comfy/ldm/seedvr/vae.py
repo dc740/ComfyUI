@@ -35,6 +35,7 @@ from comfy.ldm.modules.diffusionmodules.model import vae_attention
 import collections
 import dataclasses
 import math
+import os
 from enum import Enum
 
 import comfy.model_management
@@ -43,6 +44,9 @@ import comfy.quant_ops
 import comfy_kitchen
 
 _CL = torch.channels_last_3d
+# SEEDVR2_VAE_PLAIN_CACHES=1: keep temporal-cache tails as plain fp16 on the GPU - no int8
+# ConvRot packing, no pinned host offload (VRAM-costly but measurably faster where VRAM is free).
+_PLAIN_CACHES = bool(os.environ.get("SEEDVR2_VAE_PLAIN_CACHES"))
 
 
 def _ck_eligible(x):
@@ -310,7 +314,8 @@ class CausalMemoryCache:
 
     def _packable(self, value):
         return (
-            torch.is_tensor(value)
+            not _PLAIN_CACHES
+            and torch.is_tensor(value)
             and value.dim() == 5
             and value.is_cuda
             and value.is_contiguous(memory_format=_CL)
@@ -414,7 +419,8 @@ def _eager_factor(dtype, factor):
 def _offload_caches_for(frame_pixels):
     """Whether a pass over this frame area keeps its packed caches in host memory: when there is
     room for them, reclaiming RAM from inactive models if needed."""
-    return comfy.model_management.ensure_pin_budget(frame_pixels * SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL, evict_active=False)
+    return (not _PLAIN_CACHES
+            and comfy.model_management.ensure_pin_budget(frame_pixels * SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL, evict_active=False))
 
 
 class MemoryState(Enum):
@@ -1210,8 +1216,8 @@ class Decoder3D(nn.Module):
         self.conv_norm_out = ops.GroupNorm(num_channels=block_out_channels[0], num_groups=norm_num_groups, eps=1e-6)
         self.conv_out = InflatedCausalConv3d(block_out_channels[0], out_channels, 3, padding=1)
 
-    # Frames per pass through the spatial-only tail; None runs a slice's frames at once.
-    tail_frames = 1
+    # Frames per pass through the spatial-only tail; 0 runs a slice's frames at once.
+    tail_frames = int(os.environ.get("SEEDVR2_VAE_TAIL_FRAMES", 1))
 
     def _tail(self, source, memory_state, memory_cache):
         for up_block in self.up_blocks[self.temporal_up_num:]:
@@ -1260,7 +1266,8 @@ class VideoAutoencoderKLWrapper(nn.Module):
     spatial_downsample_factor = BYTEDANCE_VAE_SPATIAL_DOWNSAMPLE
     temporal_downsample_factor = BYTEDANCE_VAE_TEMPORAL_DOWNSAMPLE
     slicing_sample_min_size = BYTEDANCE_SLICING_SAMPLE_MIN
-    slicing_latent_min_size = BYTEDANCE_SLICING_SAMPLE_MIN // BYTEDANCE_VAE_TEMPORAL_DOWNSAMPLE
+    slicing_latent_min_size = int(os.environ.get(
+        "SEEDVR2_VAE_SLICE_MIN", BYTEDANCE_SLICING_SAMPLE_MIN // BYTEDANCE_VAE_TEMPORAL_DOWNSAMPLE))
 
     def __init__(self):
         super().__init__()
